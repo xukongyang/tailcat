@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1506,5 +1507,148 @@ func TestFetchDERPMapEncrypted(t *testing.T) {
 	}
 	if _, err := FetchDERPMap(context.Background(), DERPMapURL(srv.URL), DERPMapKey("nothex")); err == nil {
 		t.Error("fetching with a malformed key succeeded; want an error")
+	}
+}
+
+// TestLocalDERPMapPath checks the recognition of local DERP map
+// sources: bare filesystem paths and file:// URLs are local, anything
+// with another scheme is remote.
+func TestLocalDERPMapPath(t *testing.T) {
+	tests := []struct {
+		url  string
+		path string
+		ok   bool
+	}{
+		{url: "/tmp/derpmap.json", path: "/tmp/derpmap.json", ok: true},
+		{url: "file:///tmp/derpmap.json", path: "/tmp/derpmap.json", ok: true},
+		{url: "file:///tmp/sp%20ace.json", path: "/tmp/sp ace.json", ok: true},
+		// Windows drive-letter paths, in both spellings. filepath is
+		// stubbed to Unix separators here; on Windows both come back
+		// with backslashes via filepath.FromSlash.
+		{url: `C:\derpmap.json`, path: `C:\derpmap.json`, ok: true},
+		{url: "C:/derpmap.json", path: "C:/derpmap.json", ok: true},
+		{url: "file:///C:/derpmap.json", path: "C:/derpmap.json", ok: true},
+		{url: "", ok: false},
+		{url: "http://example.com/derpmap.json", ok: false},
+		{url: "https://example.com/derpmap.json", ok: false},
+		{url: "ftp://example.com/derpmap.json", ok: false},
+		{url: "file://host/share/derpmap.json", ok: false},
+	}
+	for _, tt := range tests {
+		path, ok := localDERPMapPath(tt.url)
+		if ok != tt.ok || path != tt.path {
+			t.Errorf("localDERPMapPath(%q) = (%q, %v); want (%q, %v)", tt.url, path, ok, tt.path, tt.ok)
+		}
+	}
+}
+
+// TestFetchDERPMapLocalPath verifies that DERPMapURL may name a local
+// file, bare path or file:// URL alike: it is read directly, every
+// time (no cache freshness window), and decrypted when a key is set.
+func TestFetchDERPMapLocalPath(t *testing.T) {
+	dir := t.TempDir()
+	key := bytes.Repeat([]byte{0x2a}, 32)
+	plain := []byte(`{"Regions":{"9":{"RegionID":9}}}`)
+	encPath := filepath.Join(dir, "derpmap.json.enc")
+	if err := os.WriteFile(encPath, testEncryptDERPMap(t, plain, key), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plainPath := filepath.Join(dir, "derpmap.json")
+	if err := os.WriteFile(plainPath, plain, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Bare paths and file:// URLs both work, with decryption.
+	for _, url := range []string{encPath, "file://" + encPath} {
+		dm, err := FetchDERPMap(context.Background(), DERPMapURL(url), DERPMapKey(hex.EncodeToString(key)))
+		if err != nil {
+			t.Fatalf("FetchDERPMap(%q): %v", url, err)
+		}
+		if id := dm.Regions[9].RegionID; id != 9 {
+			t.Fatalf("RegionID = %d; want 9", id)
+		}
+	}
+
+	// Plain-text files still work without a key.
+	dm, err := FetchDERPMap(context.Background(), DERPMapURL(plainPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id := dm.Regions[9].RegionID; id != 9 {
+		t.Fatalf("RegionID = %d; want 9", id)
+	}
+
+	// Local files bypass the cache: an edit is visible on the next
+	// fetch, with no freshness window.
+	plain2 := []byte(`{"Regions":{"10":{"RegionID":10}}}`)
+	if err := os.WriteFile(plainPath, plain2, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dm, err = FetchDERPMap(context.Background(), DERPMapURL(plainPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dm.Regions[10] == nil {
+		t.Fatalf("re-read of %q got stale content: %+v", plainPath, dm.Regions)
+	}
+
+	// A wrong key still fails, as with remote maps.
+	if _, err := FetchDERPMap(context.Background(), DERPMapURL(encPath), DERPMapKey(strings.Repeat("0", 64))); err == nil {
+		t.Error("reading an encrypted local map with the wrong key succeeded; want an error")
+	}
+}
+
+// TestFetchDERPMapInlineBase64 verifies the base64: source form: the
+// flag value is the base64-encoded map payload itself, in either
+// base64 alphabet with or without padding, decrypting the payload
+// when a key is set.
+func TestFetchDERPMapInlineBase64(t *testing.T) {
+	key := bytes.Repeat([]byte{0x2a}, 32)
+	plain := []byte(`{"Regions":{"8":{"RegionID":8}}}`)
+	check := func(t *testing.T, dm *tailcfg.DERPMap, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id := dm.Regions[8].RegionID; id != 8 {
+			t.Fatalf("RegionID = %d; want 8", id)
+		}
+	}
+
+	for _, e := range []struct {
+		name string
+		enc  *base64.Encoding
+	}{
+		{"std", base64.StdEncoding},
+		{"raw_std", base64.RawStdEncoding},
+		{"url", base64.URLEncoding},
+		{"raw_url", base64.RawURLEncoding},
+	} {
+		t.Run(e.name, func(t *testing.T) {
+			dm, err := FetchDERPMap(context.Background(), DERPMapURL("base64:"+e.enc.EncodeToString(plain)))
+			check(t, dm, err)
+		})
+	}
+
+	// Surrounding and embedded whitespace is tolerated.
+	full := base64.StdEncoding.EncodeToString(plain)
+	multiline := "base64:" + full[:len(full)/2] + "\n  " + full[len(full)/2:]
+	dm, err := FetchDERPMap(context.Background(), DERPMapURL(multiline))
+	check(t, dm, err)
+
+	// An encrypted payload works with its key, and fails without.
+	encrypted := base64.StdEncoding.EncodeToString(testEncryptDERPMap(t, plain, key))
+	dm, err = FetchDERPMap(context.Background(), DERPMapURL("base64:"+encrypted), DERPMapKey(hex.EncodeToString(key)))
+	check(t, dm, err)
+	if _, err := FetchDERPMap(context.Background(), DERPMapURL("base64:"+encrypted)); err == nil {
+		t.Error("inline encrypted map without a key succeeded; want an error")
+	}
+
+	// Malformed payloads are reported, not misread as paths.
+	if _, err := FetchDERPMap(context.Background(), DERPMapURL("base64:not!valid")); err == nil {
+		t.Error("invalid base64 succeeded; want an error")
+	}
+	if _, err := FetchDERPMap(context.Background(), DERPMapURL("base64:")); err == nil {
+		t.Error("empty base64 payload succeeded; want an error")
 	}
 }

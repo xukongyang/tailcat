@@ -97,7 +97,7 @@ func newRootCommand() *ff.Command {
 	flagKey = rootFS.StringLong("key", "", "'new' for an ephemeral key. If empty, the default saved key is used if it exists ('default' in server mode, 'client-default' in client modes; see genkey), else an ephemeral key. Otherwise the path to a *.private.json or a name like 'foo' to read it from $CONFIG/tailcat/keys/foo.private.json")
 	flagVerbose = rootFS.BoolLong("verbose", "be verbose")
 	flagJSON = rootFS.BoolLong("json", "in server mode, write {\"listenAddr\": ...} JSON to stdout")
-	flagDERPMapURL = rootFS.StringLong("derpmap-url", cmp.Or(os.Getenv("TAILCAT_DERPMAP_URL"), tailcat.DefaultDERPMapURL), "URL of the JSON DERP map used to resolve or auto-select a DERP region; its default can also be set with the TAILCAT_DERPMAP_URL environment variable")
+	flagDERPMapURL = rootFS.StringLong("derpmap-url", cmp.Or(os.Getenv("TAILCAT_DERPMAP_URL"), tailcat.DefaultDERPMapURL), "URL, local file path, file:// URL, or base64:-prefixed inline payload of the JSON DERP map used to resolve or auto-select a DERP region; its default can also be set with the TAILCAT_DERPMAP_URL environment variable")
 	flagDERPMapKey = rootFS.StringLong("derpmap-key", os.Getenv("TAILCAT_DERPMAP_KEY"), "hex-encoded 32-byte AES key (as printed by derpmap-encrypt -genkey) used to decrypt the DERP map fetched from --derpmap-url; its default can also be set with the TAILCAT_DERPMAP_KEY environment variable")
 
 	serveFS = ff.NewFlagSet("serve").SetParent(rootFS)

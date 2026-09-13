@@ -542,10 +542,12 @@ $ tailcat parse tcomFwWCCAIsKOqPUux6ClG2RM4A_vOq4VBzGgHGGjq9OsJuFKSWFygaFhToGhYW
 so clients need no extra flags and never contact Tailscale's DERP map
 server or relays, and the only rate limits are yours. Alternatively,
 if you run a whole fleet of relays, serve your own DERP map JSON and
-point both sides at it with `--derpmap-url`. The map may be encrypted
-on your web server: `derpmap-encrypt` wraps the JSON in AES-256-GCM,
-and both sides decrypt it with `--derpmap-key` (default from the
-`TAILCAT_DERPMAP_KEY` environment variable).
+point both sides at it with `--derpmap-url`: an http(s) URL, a local
+file (a path or `file://` URL, re-read on every use), or the map
+payload itself as a `base64:`-prefixed string. The map may be
+encrypted on your web server: `derpmap-encrypt` wraps the JSON in
+AES-256-GCM, and both sides decrypt it with `--derpmap-key` (default
+from the `TAILCAT_DERPMAP_KEY` environment variable).
 
 ### Go library
 

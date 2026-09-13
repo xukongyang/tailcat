@@ -53,6 +53,9 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"slices"
@@ -108,8 +111,9 @@ var Verbose = false
 const DefaultDERPMapURL = "https://tailcat.dev/derpmap.json"
 
 // DERPMapURL is an option for [ConnInfo.Expand] specifying an
-// alternate URL to fetch the DERP map from instead of
-// [DefaultDERPMapURL].
+// alternate source for the DERP map instead of [DefaultDERPMapURL]:
+// an http(s) URL, a file:// URL, a bare filesystem path, or a
+// base64:-prefixed inline payload.
 type DERPMapURL string
 
 // DERPMapKey is an option for [ConnInfo.Expand] and [FetchDERPMap]
@@ -444,9 +448,10 @@ type Server struct {
 	// on latency at Start.
 	RegionID tailcfg.DERPRegionID
 
-	// DERPMapURL, if non-empty, is an alternate URL to fetch the DERP
-	// map from when Region is nil. If empty, [DefaultDERPMapURL] is
-	// used.
+	// DERPMapURL, if non-empty, is an alternate source for the DERP
+	// map when Region is nil: an http(s) URL, a file:// URL, a bare
+	// filesystem path, or a base64:-prefixed inline payload. If
+	// empty, [DefaultDERPMapURL] is used.
 	DERPMapURL string
 
 	// DERPMapKey, if non-empty, is the hex-encoded key ([DERPMapKey])
@@ -1290,6 +1295,33 @@ func fetchDERPMap(ctx context.Context, fetchURL, mode string, derpMapKey DERPMap
 		}
 		return dm, nil
 	}
+	if b64, ok := strings.CutPrefix(fetchURL, "base64:"); ok {
+		// The payload itself, base64-encoded: handy for environment
+		// variables and templated configs. Decrypted like any other
+		// source when a key is set.
+		data, err := decodeBase64DERPMap(b64)
+		if err != nil {
+			return nil, fmt.Errorf("decoding base64 DERP map: %v", err)
+		}
+		dm, err := decode(data)
+		if err != nil {
+			return nil, fmt.Errorf("invalid DERP map from inline base64: %w", err)
+		}
+		return dm, nil
+	}
+	if path, ok := localDERPMapPath(fetchURL); ok {
+		// Local files are read directly, every time: no cache, no
+		// freshness window, so edits take effect on the next use.
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		dm, err := decode(data)
+		if err != nil {
+			return nil, fmt.Errorf("invalid DERP map from %v: %w", fetchURL, err)
+		}
+		return dm, nil
+	}
 	if cache == nil {
 		cache = defaultDERPMapCache
 	}
@@ -1381,6 +1413,57 @@ func parseDERPMapKey(s string) ([]byte, error) {
 		return nil, fmt.Errorf("DERP map key is %d bytes; want 32 (64 hex chars)", len(key))
 	}
 	return key, nil
+}
+
+// localDERPMapPath reports whether fetchURL names a local file rather
+// than a remote map: either a file:// URL or a bare filesystem path
+// (relative paths are taken against the current directory), returning
+// the file's path if so. Anything else is treated as a remote URL for
+// http.Get.
+func localDERPMapPath(fetchURL string) (string, bool) {
+	if fetchURL == "" || strings.HasPrefix(fetchURL, "base64:") {
+		return "", false
+	}
+	if rest, ok := strings.CutPrefix(fetchURL, "file://"); ok {
+		u, err := url.Parse("file://" + rest)
+		if err != nil || u.Host != "" {
+			// Unparsable, or a machine-qualified share with no
+			// local meaning.
+			return "", false
+		}
+		path := u.Path
+		// file:///C:/x parses to /C:/x on drive-letter paths.
+		if len(path) >= 3 && path[0] == '/' && path[2] == ':' {
+			path = path[1:]
+		}
+		return filepath.FromSlash(path), true
+	}
+	if strings.Contains(fetchURL, "://") {
+		return "", false
+	}
+	return filepath.FromSlash(fetchURL), true
+}
+
+// decodeBase64DERPMap decodes the payload of a base64: DERP map
+// source, accepting either base64 alphabet, with or without padding,
+// and ignoring whitespace, which copy-paste tends to introduce.
+func decodeBase64DERPMap(s string) ([]byte, error) {
+	s = strings.Join(strings.Fields(s), "")
+	if s == "" {
+		return nil, errors.New("empty base64 payload")
+	}
+	urlSafe := strings.ContainsAny(s, "-_")
+	padded := len(s)%4 == 0
+	switch {
+	case padded && !urlSafe:
+		return base64.StdEncoding.DecodeString(s)
+	case padded:
+		return base64.URLEncoding.DecodeString(s)
+	case urlSafe:
+		return base64.RawURLEncoding.DecodeString(s)
+	default:
+		return base64.RawStdEncoding.DecodeString(s)
+	}
 }
 
 // decryptDERPMap decrypts data with AES-256-GCM when key is non-nil,
@@ -1927,10 +2010,12 @@ type Client struct {
 	// is used. If set, it must be set before the client's first use.
 	Logf logger.Logf
 
-	// DERPMapURL, if non-empty, is an alternate URL to fetch the DERP
-	// map from when the address doesn't embed the relay details.
-	// If empty, [DefaultDERPMapURL] is used. If set, it must be set
-	// before the client's first use.
+	// DERPMapURL, if non-empty, is an alternate source for the DERP
+	// map when the address doesn't embed the relay details: an
+	// http(s) URL, a file:// URL, a bare filesystem path, or a
+	// base64:-prefixed inline payload. If empty,
+	// [DefaultDERPMapURL] is used. If set, it must be set before the
+	// client's first use.
 	DERPMapURL string
 
 	// DERPMapKey, if non-empty, is the hex-encoded key ([DERPMapKey])
