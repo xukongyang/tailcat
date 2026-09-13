@@ -6,7 +6,11 @@ package tailcat
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	cryptorand "crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1411,5 +1415,96 @@ func TestParseAddrRawKeepsNulls(t *testing.T) {
 	}
 	if len(w.Region) != 1 || w.Region[0] != nil {
 		t.Errorf("Region = %v; want a single nil element", w.Region)
+	}
+}
+
+// testEncryptDERPMap encrypts plain with AES-256-GCM in the format
+// the derpmap-encrypt command writes: a 12-byte random nonce followed
+// by the ciphertext and authentication tag.
+func testEncryptDERPMap(t *testing.T, plain, key []byte) []byte {
+	t.Helper()
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := cryptorand.Read(nonce); err != nil {
+		t.Fatal(err)
+	}
+	return gcm.Seal(nonce, nonce, plain, nil)
+}
+
+// TestDecryptDERPMap checks decryptDERPMap: round-trip against the
+// derpmap-encrypt format, pass-through with no key, and failure on a
+// wrong key or truncated data.
+func TestDecryptDERPMap(t *testing.T) {
+	key := bytes.Repeat([]byte{0x2a}, 32)
+	plain := []byte(`{"Regions":{}}`)
+
+	got, err := decryptDERPMap(testEncryptDERPMap(t, plain, key), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Errorf("decrypt = %q; want %q", got, plain)
+	}
+
+	got, err = decryptDERPMap(plain, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, plain) {
+		t.Errorf("decrypt with nil key = %q; want the unchanged input %q", got, plain)
+	}
+
+	if _, err := decryptDERPMap(testEncryptDERPMap(t, plain, key), bytes.Repeat([]byte{1}, 32)); err == nil {
+		t.Error("decrypt with the wrong key succeeded; want an error")
+	}
+	if _, err := decryptDERPMap([]byte{1, 2}, key); err == nil {
+		t.Error("decrypt of data shorter than the nonce succeeded; want an error")
+	}
+}
+
+// TestFetchDERPMapEncrypted verifies the DERPMapKey option: an
+// encrypted DERP map decrypts with the right key, including when it
+// comes from the cache, and a missing, wrong, or malformed key
+// reports an error instead.
+func TestFetchDERPMapEncrypted(t *testing.T) {
+	key := bytes.Repeat([]byte{0x2a}, 32)
+	plain := []byte(`{"Regions":{"7":{"RegionID":7}}}`)
+
+	var fetches atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetches.Add(1)
+		w.Write(testEncryptDERPMap(t, plain, key))
+	}))
+	defer srv.Close()
+
+	opts := []any{DERPMapURL(srv.URL), DERPMapKey(hex.EncodeToString(key))}
+	for range 2 {
+		dm, err := FetchDERPMap(context.Background(), opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id := dm.Regions[7].RegionID; id != 7 {
+			t.Fatalf("RegionID = %d; want 7", id)
+		}
+	}
+	if n := fetches.Load(); n != 1 {
+		t.Errorf("fetches = %d; want 1 (the second fetch should come from cache)", n)
+	}
+
+	if _, err := FetchDERPMap(context.Background(), DERPMapURL(srv.URL)); err == nil {
+		t.Error("fetching an encrypted DERP map with no key succeeded; want an error")
+	}
+	if _, err := FetchDERPMap(context.Background(), DERPMapURL(srv.URL), DERPMapKey(strings.Repeat("0", 64))); err == nil {
+		t.Error("fetching an encrypted DERP map with the wrong key succeeded; want an error")
+	}
+	if _, err := FetchDERPMap(context.Background(), DERPMapURL(srv.URL), DERPMapKey("nothex")); err == nil {
+		t.Error("fetching with a malformed key succeeded; want an error")
 	}
 }

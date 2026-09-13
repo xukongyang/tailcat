@@ -35,6 +35,8 @@ package tailcat
 import (
 	"cmp"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hmac"
 	cryptorand "crypto/rand"
 	"crypto/sha256"
@@ -109,6 +111,14 @@ const DefaultDERPMapURL = "https://tailcat.dev/derpmap.json"
 // alternate URL to fetch the DERP map from instead of
 // [DefaultDERPMapURL].
 type DERPMapURL string
+
+// DERPMapKey is an option for [ConnInfo.Expand] and [FetchDERPMap]
+// specifying the hex-encoded 32-byte AES key (as printed by the
+// derpmap-encrypt command) used to decrypt the fetched DERP map,
+// which must be in the command's format: a 12-byte nonce followed by
+// the AES-256-GCM ciphertext and authentication tag. An empty key,
+// including no option at all, means the DERP map is plain-text JSON.
+type DERPMapKey string
 
 // DERPMapCache is an option for [ConnInfo.Expand] and [FetchDERPMap]
 // that caches fetched DERP maps. Without one, a process-wide
@@ -439,6 +449,11 @@ type Server struct {
 	// used.
 	DERPMapURL string
 
+	// DERPMapKey, if non-empty, is the hex-encoded key ([DERPMapKey])
+	// used to decrypt the fetched DERP map. It must be set before
+	// Start.
+	DERPMapKey string
+
 	// DERPMapCache, if non-nil, caches fetched DERP maps. If nil, a
 	// process-wide in-memory cache is used.
 	DERPMapCache DERPMapCache
@@ -600,6 +615,9 @@ func (s *Server) startLocked(ctx context.Context) error {
 		opts := []any{ExpandForServer}
 		if s.DERPMapURL != "" {
 			opts = append(opts, DERPMapURL(s.DERPMapURL))
+		}
+		if s.DERPMapKey != "" {
+			opts = append(opts, DERPMapKey(s.DERPMapKey))
 		}
 		if s.DERPMapCache != nil {
 			opts = append(opts, s.DERPMapCache)
@@ -1186,6 +1204,7 @@ func ParseAddr(addr Addr) (ConnInfo, error) {
 // contain any of the following types:
 //   - [DERPMapURL]: fetch from an alternate URL instead of
 //     [DefaultDERPMapURL].
+//   - [DERPMapKey]: decrypt the fetched DERP map with the given key.
 //   - [ExpandForServer]: mark the fetch as being on behalf of a
 //     tailcat server rather than a client.
 //   - [DERPMapCache]: cache fetched DERP maps (defaults to a
@@ -1193,11 +1212,14 @@ func ParseAddr(addr Addr) (ConnInfo, error) {
 func FetchDERPMap(ctx context.Context, opts ...any) (*tailcfg.DERPMap, error) {
 	fetchURL := DefaultDERPMapURL
 	mode := "client"
+	var derpMapKey DERPMapKey
 	var cache DERPMapCache
 	for _, opt := range opts {
 		switch v := opt.(type) {
 		case DERPMapURL:
 			fetchURL = string(v)
+		case DERPMapKey:
+			derpMapKey = v
 		case expandForServer:
 			mode = "server"
 		case DERPMapCache:
@@ -1206,7 +1228,7 @@ func FetchDERPMap(ctx context.Context, opts ...any) (*tailcfg.DERPMap, error) {
 			return nil, fmt.Errorf("unknown FetchDERPMap option type %T", opt)
 		}
 	}
-	return fetchDERPMap(ctx, fetchURL, mode, cache)
+	return fetchDERPMap(ctx, fetchURL, mode, derpMapKey, cache)
 }
 
 // memDERPMapCache is a process-wide in-memory [DERPMapCache], the
@@ -1240,22 +1262,41 @@ func (c *memDERPMapCache) Put(url string, data []byte, etag string) error {
 
 // fetchDERPMap fetches and decodes the JSON DERP map from fetchURL,
 // sending mode ("client" or "server") as the Tailcat-Mode hint
-// header. If cache is nil, a process-wide in-memory cache is used;
-// either way, it's used per the freshness policy documented on
-// [DERPMapCache].
+// header. When derpMapKey is non-empty, the fetched (and cached) data
+// is AES-256-GCM ciphertext rather than plain-text JSON. If cache is
+// nil, a process-wide in-memory cache is used; either way, it's used
+// per the freshness policy documented on [DERPMapCache].
 //
 // TODO: do a fresh fetch (ignoring cache freshness) if we ever fail
 // to connect to any DERP region afterwards, e.g. if the cached map is
 // so stale that no region answers or the region an address references no
 // longer exists. For now staleness is only bounded by the max age.
-func fetchDERPMap(ctx context.Context, fetchURL, mode string, cache DERPMapCache) (*tailcfg.DERPMap, error) {
+func fetchDERPMap(ctx context.Context, fetchURL, mode string, derpMapKey DERPMapKey, cache DERPMapCache) (*tailcfg.DERPMap, error) {
+	key, err := parseDERPMapKey(string(derpMapKey))
+	if err != nil {
+		return nil, err
+	}
+	// decode turns stored or fetched bytes into a DERP map,
+	// decrypting first when a key is set: the cache stores whatever
+	// the server sent, ciphertext included.
+	decode := func(data []byte) (*tailcfg.DERPMap, error) {
+		plain, err := decryptDERPMap(data, key)
+		if err != nil {
+			return nil, err
+		}
+		dm := decodeDERPMap(plain)
+		if dm == nil {
+			return nil, errors.New("invalid DERP map JSON")
+		}
+		return dm, nil
+	}
 	if cache == nil {
 		cache = defaultDERPMapCache
 	}
 	var cachedData []byte
 	var cachedETag string
 	if data, etag, storedAt, ok := cache.Get(fetchURL); ok {
-		if dm := decodeDERPMap(data); dm != nil {
+		if dm, err := decode(data); err == nil {
 			if time.Since(storedAt) < derpMapCacheMaxAge {
 				return dm, nil
 			}
@@ -1269,7 +1310,7 @@ func fetchDERPMap(ctx context.Context, fetchURL, mode string, cache DERPMapCache
 	defer cancel()
 
 	staleOr := func(err error) (*tailcfg.DERPMap, error) {
-		if dm := decodeDERPMap(cachedData); dm != nil {
+		if dm, err := decode(cachedData); err == nil {
 			return dm, nil
 		}
 		return nil, err
@@ -1290,8 +1331,12 @@ func fetchDERPMap(ctx context.Context, fetchURL, mode string, cache DERPMapCache
 	defer res.Body.Close()
 	if res.StatusCode == http.StatusNotModified && cachedData != nil {
 		// Still valid; re-store it to restart the freshness window.
+		dm, err := decode(cachedData)
+		if err != nil {
+			return nil, err
+		}
 		cache.Put(fetchURL, cachedData, cachedETag)
-		return decodeDERPMap(cachedData), nil
+		return dm, nil
 	}
 	if res.StatusCode != 200 {
 		return staleOr(fmt.Errorf("fetching %v: %v", fetchURL, res.Status))
@@ -1300,9 +1345,9 @@ func fetchDERPMap(ctx context.Context, fetchURL, mode string, cache DERPMapCache
 	if err != nil {
 		return staleOr(err)
 	}
-	dm := decodeDERPMap(body)
-	if dm == nil {
-		return staleOr(fmt.Errorf("invalid DERP map JSON from %v", fetchURL))
+	dm, err := decode(body)
+	if err != nil {
+		return staleOr(fmt.Errorf("invalid DERP map from %v: %w", fetchURL, err))
 	}
 	cache.Put(fetchURL, body, res.Header.Get("Etag"))
 	return dm, nil
@@ -1321,6 +1366,50 @@ func decodeDERPMap(data []byte) *tailcfg.DERPMap {
 	return dm
 }
 
+// parseDERPMapKey decodes a hex-encoded 32-byte AES key, as printed
+// by the derpmap-encrypt command. An empty string means no key: the
+// DERP map is plain-text JSON.
+func parseDERPMapKey(s string) ([]byte, error) {
+	if s == "" {
+		return nil, nil
+	}
+	key, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("parsing DERP map key: %v (want 64 hex chars, as printed by derpmap-encrypt -genkey)", err)
+	}
+	if len(key) != 32 {
+		return nil, fmt.Errorf("DERP map key is %d bytes; want 32 (64 hex chars)", len(key))
+	}
+	return key, nil
+}
+
+// decryptDERPMap decrypts data with AES-256-GCM when key is non-nil,
+// in the format the derpmap-encrypt command writes: a 12-byte random
+// nonce followed by the ciphertext and authentication tag. A nil key
+// passes data through unchanged, for plain-text DERP maps.
+func decryptDERPMap(data, key []byte) ([]byte, error) {
+	if key == nil {
+		return data, nil
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) < gcm.NonceSize() {
+		return nil, errors.New("data is shorter than the GCM nonce")
+	}
+	nonce, ciphertext := data[:gcm.NonceSize()], data[gcm.NonceSize():]
+	plain, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, fmt.Errorf("AES-GCM open failed (wrong key, or the map was modified): %v", err)
+	}
+	return plain, nil
+}
+
 // Expand populates ci.Region from a DERP map if only ci.RegionID was set.
 // If ci.Region is already populated, Expand is a no-op. When RegionID is -1,
 // the best region is selected automatically via netcheck latency probes.
@@ -1328,6 +1417,7 @@ func decodeDERPMap(data []byte) *tailcfg.DERPMap {
 // The opts may contain any of the following types:
 //   - [DERPMapURL]: fetch the DERP map from an alternate URL instead
 //     of [DefaultDERPMapURL].
+//   - [DERPMapKey]: decrypt the fetched DERP map with the given key.
 //   - [*tailcfg.DERPMap]: expand from the provided DERP map instead
 //     of fetching one over the network.
 //   - [ExpandForServer]: mark the DERP map fetch as being on behalf
@@ -1338,11 +1428,14 @@ func (ci *ConnInfo) Expand(ctx context.Context, opts ...any) error {
 	fetchURL := DefaultDERPMapURL
 	mode := "client"
 	var dm *tailcfg.DERPMap
+	var derpMapKey DERPMapKey
 	var cache DERPMapCache
 	for _, opt := range opts {
 		switch v := opt.(type) {
 		case DERPMapURL:
 			fetchURL = string(v)
+		case DERPMapKey:
+			derpMapKey = v
 		case *tailcfg.DERPMap:
 			dm = v
 		case expandForServer:
@@ -1374,7 +1467,7 @@ func (ci *ConnInfo) Expand(ctx context.Context, opts ...any) error {
 	if dm == nil {
 		dmSrc = fetchURL
 		var err error
-		dm, err = fetchDERPMap(ctx, fetchURL, mode, cache)
+		dm, err = fetchDERPMap(ctx, fetchURL, mode, derpMapKey, cache)
 		if err != nil {
 			return fmt.Errorf("fetching DERPMap for region %v: %w", ci.RegionID, err)
 		}
@@ -1840,6 +1933,11 @@ type Client struct {
 	// before the client's first use.
 	DERPMapURL string
 
+	// DERPMapKey, if non-empty, is the hex-encoded key ([DERPMapKey])
+	// used to decrypt the fetched DERP map. If set, it must be set
+	// before the client's first use.
+	DERPMapKey string
+
 	// DERPMapCache, if non-nil, caches fetched DERP maps. If nil, a
 	// process-wide in-memory cache is used. If set, it must be set
 	// before the client's first use.
@@ -2034,6 +2132,9 @@ func (c *Client) ensureStarted(ctx context.Context) error {
 	var opts []any
 	if c.DERPMapURL != "" {
 		opts = append(opts, DERPMapURL(c.DERPMapURL))
+	}
+	if c.DERPMapKey != "" {
+		opts = append(opts, DERPMapKey(c.DERPMapKey))
 	}
 	if c.DERPMapCache != nil {
 		opts = append(opts, c.DERPMapCache)

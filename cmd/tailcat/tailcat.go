@@ -61,6 +61,7 @@ var (
 	flagFullAddress       *bool
 	flagJSON              *bool
 	flagDERPMapURL        *string
+	flagDERPMapKey        *string
 )
 
 var serveFS *ff.FlagSet
@@ -97,6 +98,7 @@ func newRootCommand() *ff.Command {
 	flagVerbose = rootFS.BoolLong("verbose", "be verbose")
 	flagJSON = rootFS.BoolLong("json", "in server mode, write {\"listenAddr\": ...} JSON to stdout")
 	flagDERPMapURL = rootFS.StringLong("derpmap-url", cmp.Or(os.Getenv("TAILCAT_DERPMAP_URL"), tailcat.DefaultDERPMapURL), "URL of the JSON DERP map used to resolve or auto-select a DERP region; its default can also be set with the TAILCAT_DERPMAP_URL environment variable")
+	flagDERPMapKey = rootFS.StringLong("derpmap-key", os.Getenv("TAILCAT_DERPMAP_KEY"), "hex-encoded 32-byte AES key (as printed by derpmap-encrypt -genkey) used to decrypt the DERP map fetched from --derpmap-url; its default can also be set with the TAILCAT_DERPMAP_KEY environment variable")
 
 	serveFS = ff.NewFlagSet("serve").SetParent(rootFS)
 	flagAllow = serveFS.StringLong("allow", "", "comma-separated list of public keys to allow access to the server, or 'none' to allow no clients. If empty, all clients are allowed.")
@@ -419,7 +421,9 @@ Environment:
 	given file path or, with a "tcp:" prefix, send it to that TCP
 	address.
 
-	TAILCAT_DERPMAP_URL: the default value of the --derpmap-url flag.`
+	TAILCAT_DERPMAP_URL: the default value of the --derpmap-url flag.
+
+	TAILCAT_DERPMAP_KEY: the default value of the --derpmap-key flag.`
 
 const serveLongHelp = `Run a tailcat server, printing its tailcat address for clients to
 connect to. Running tailcat with no arguments is the same as running
@@ -811,6 +815,7 @@ func newClient(logf logger.Logf, addr tailcat.Addr, priv key.NodePrivate) *tailc
 		Key:          priv,
 		Logf:         logf,
 		DERPMapURL:   *flagDERPMapURL,
+		DERPMapKey:   *flagDERPMapKey,
 		DERPMapCache: derpMapCache{},
 	}
 }
@@ -1197,7 +1202,7 @@ func clientResolveMode(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	resolved, err := tailcatAddrArg(args[0]).Resolve(ctx, tailcat.DERPMapURL(*flagDERPMapURL), derpMapCache{})
+	resolved, err := tailcatAddrArg(args[0]).Resolve(ctx, tailcat.DERPMapURL(*flagDERPMapURL), tailcat.DERPMapKey(*flagDERPMapKey), derpMapCache{})
 	if err != nil {
 		return err
 	}
@@ -1352,7 +1357,7 @@ func server(logf logger.Logf, serveSpec string, execArgs []string) {
 		// zeroes RegionID when it populates Region.
 		embed := *flagFullAddress || len(ci.Region) > 0
 
-		if err := ci.Expand(context.Background(), tailcat.ExpandForServer, tailcat.DERPMapURL(*flagDERPMapURL), derpMapCache{}); err != nil {
+		if err := ci.Expand(context.Background(), tailcat.ExpandForServer, tailcat.DERPMapURL(*flagDERPMapURL), tailcat.DERPMapKey(*flagDERPMapKey), derpMapCache{}); err != nil {
 			log.Fatalf("Expand: %v", err)
 		}
 		reg = ci.Region[0]
@@ -1914,7 +1919,7 @@ func genKey(args []string) error {
 	if match != "" || *region == "" || *embedDERPMap {
 		// genkey picks the region a future server will listen on,
 		// hence ExpandForServer.
-		got, err := tailcat.FetchDERPMap(ctx, tailcat.DERPMapURL(*flagDERPMapURL), tailcat.ExpandForServer, derpMapCache{})
+		got, err := tailcat.FetchDERPMap(ctx, tailcat.DERPMapURL(*flagDERPMapURL), tailcat.DERPMapKey(*flagDERPMapKey), tailcat.ExpandForServer, derpMapCache{})
 		if err != nil {
 			log.Fatalf("derpmap fetch: %v", err)
 		}

@@ -26,6 +26,10 @@
   returns one client flow as a `net.Conn`. Listeners claim their
   specific ports ahead of the wildcard hooks, and Listen starts the
   server if it isn't running yet.
+- The DERP map fetched from `--derpmap-url` may be encrypted: the new
+  `derpmap-encrypt` command encrypts a JSON DERP map with AES-256-GCM,
+  and both sides decrypt it with `--derpmap-key` (default from the
+  `TAILCAT_DERPMAP_KEY` environment variable).
 - `tailcat forward` takes an `--open-browser` flag that opens a web
   browser to the forwarded local port; `tailcat browse <tc-addr>` is
   an alias for `tailcat forward --open-browser <tc-addr> 0:80`.
