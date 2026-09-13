@@ -44,7 +44,7 @@ func TestSSHProxyCommandDERPMap(t *testing.T) {
 		port = "22"
 		url  = "https://derp.example.com/derpmap.json"
 	)
-	got, err := sshProxyCommand(exe, key, url, addr, port)
+	got, err := sshProxyCommand(exe, key, url, "", addr, port)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestSSHProxyCommandDERPMap(t *testing.T) {
 		t.Errorf("sshProxyCommand with custom DERP map = %q; want %q", got, want)
 	}
 
-	got, err = sshProxyCommand(exe, key, tailcat.DefaultDERPMapURL, addr, port)
+	got, err = sshProxyCommand(exe, key, tailcat.DefaultDERPMapURL, "", addr, port)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,10 +68,36 @@ func TestSSHProxyCommandDERPMap(t *testing.T) {
 		t.Errorf("sshProxyCommand with default DERP map = %q; want %q", got, want)
 	}
 
+	// A non-empty DERP map key is passed through, whatever the URL.
+	got, err = sshProxyCommand(exe, key, url, "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20", addr, port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = `'` + exe + `' '--key=client-default' '--derpmap-url=https://derp.example.com/derpmap.json' '--derpmap-key=0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20' 'tc-short-addr' '22'`
+	if runtime.GOOS == "windows" {
+		want = `"/path/to/tailcat" "--key=client-default" "--derpmap-url=https://derp.example.com/derpmap.json" "--derpmap-key=0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20" "tc-short-addr" "22"`
+	}
+	if got != want {
+		t.Errorf("sshProxyCommand with DERP map key = %q; want %q", got, want)
+	}
+
+	// No DERP map key flag at all when unset.
+	got, err = sshProxyCommand(exe, key, url, "", addr, port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = `'` + exe + `' '--key=client-default' '--derpmap-url=https://derp.example.com/derpmap.json' 'tc-short-addr' '22'`
+	if runtime.GOOS == "windows" {
+		want = `"/path/to/tailcat" "--key=client-default" "--derpmap-url=https://derp.example.com/derpmap.json" "tc-short-addr" "22"`
+	}
+	if got != want {
+		t.Errorf("sshProxyCommand with no DERP map key = %q; want %q", got, want)
+	}
+
 	// No --key flag at all when unset. The shell would collapse
 	// --key="" to --key=, which ff parses by consuming the next
 	// argument, the tailcat address.
-	got, err = sshProxyCommand(exe, "", tailcat.DefaultDERPMapURL, addr, port)
+	got, err = sshProxyCommand(exe, "", tailcat.DefaultDERPMapURL, "", addr, port)
 	if err != nil {
 		t.Fatal(err)
 	}
