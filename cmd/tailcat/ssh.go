@@ -113,7 +113,7 @@ func clientSSHMode(portOrIPPort string, skipDNSCheck bool, args []string) error 
 	if sshUser != "" {
 		sshDst = sshUser + "@" + sshDst
 	}
-	proxyCommand, err := sshProxyCommand(exe, *flagKey, *flagDERPMapURL, addrStr, portOrIPPort)
+	proxyCommand, err := sshProxyCommand(exe, *flagKey, *flagDERPMapURL, *flagDERPMapKey, addrStr, portOrIPPort)
 	if err != nil {
 		return err
 	}
@@ -254,7 +254,7 @@ func probeStrangerSSH(ctx context.Context, logf logger.Logf, derpMapURL, addr, p
 // sshProxyCommand returns the command passed to OpenSSH to connect the SSH
 // client to a tailcat server. The command is run by OpenSSH, so values that
 // can contain shell-special characters must be quoted.
-func sshProxyCommand(exe, keyName, derpMapURL, addr, portOrIPPort string) (string, error) {
+func sshProxyCommand(exe, keyName, derpMapURL, derpMapKey, addr, portOrIPPort string) (string, error) {
 	args := []string{exe}
 	// No --key flag at all when unset: ff parses --key= by consuming the
 	// tailcat address as the flag's value.
@@ -263,6 +263,9 @@ func sshProxyCommand(exe, keyName, derpMapURL, addr, portOrIPPort string) (strin
 	}
 	if derpMapURL != tailcat.DefaultDERPMapURL {
 		args = append(args, "--derpmap-url="+derpMapURL)
+	}
+	if derpMapKey != "" {
+		args = append(args, "--derpmap-key="+derpMapKey)
 	}
 	args = append(args, addr, portOrIPPort)
 	if runtime.GOOS == "windows" {

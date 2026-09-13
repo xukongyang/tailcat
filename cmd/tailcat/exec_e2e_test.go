@@ -131,7 +131,7 @@ func TestServeSSHExec(t *testing.T) {
 	}
 	_, addr, stderr := e.startServer("serve", "--ssh-authorized-keys="+keyPath+".pub", "ssh", "--", "cat")
 	waitForLog(t, stderr, "# SSH sessions run only "+cat+"\n")
-	proxyCommand, err := sshProxyCommand(e.bin, "new", e.derpMapURL, addr, "22")
+	proxyCommand, err := sshProxyCommand(e.bin, "new", e.derpMapURL, "", addr, "22")
 	if err != nil {
 		t.Fatal(err)
 	}
