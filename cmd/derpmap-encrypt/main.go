@@ -7,12 +7,16 @@
 // Usage:
 //
 //	derpmap-encrypt -genkey
+//	derpmap-encrypt -genkey -o <keyfile>
 //	derpmap-encrypt -key <hex-key> <derpmap.json>
 //	derpmap-encrypt -key <hex-key> -decrypt <derpmap.json.enc>
 //
-// The first form prints a fresh random 32-byte key, hex-encoded.
-// The second encrypts derpmap.json to derpmap.json.enc. The third
-// decrypts to stdout, to check a file before serving it.
+// The first form prints a fresh random 32-byte key, hex-encoded. The
+// second writes one to keyfile instead (mode 0600 on Unix; on
+// Windows, restrict the file with icacls), so the key never appears
+// in a shell's history or in process listings. The third encrypts
+// derpmap.json to derpmap.json.enc. The fourth decrypts to stdout,
+// to check a file before serving it.
 package main
 
 import (
@@ -28,16 +32,24 @@ import (
 
 func main() {
 	genkey := flag.Bool("genkey", false, "generate a random 32-byte key and exit")
+	keyOut := flag.String("o", "", "with -genkey, write the key to this file (mode 0600) instead of printing it")
 	keyHex := flag.String("key", "", "hex-encoded 32-byte AES key, as printed by -genkey")
 	decrypt := flag.Bool("decrypt", false, "decrypt the input file to stdout instead of encrypting")
 	flag.Parse()
 
 	if *genkey {
-		key := make([]byte, 32)
-		if _, err := rand.Read(key); err != nil {
-			fatalf("generating key: %v", err)
+		if *keyOut == "" {
+			key := make([]byte, 32)
+			if _, err := rand.Read(key); err != nil {
+				fatalf("generating key: %v", err)
+			}
+			fmt.Println(hex.EncodeToString(key))
+			return
 		}
-		fmt.Println(hex.EncodeToString(key))
+		if _, err := genKeyFile(*keyOut); err != nil {
+			fatalf("%v", err)
+		}
+		fmt.Printf("wrote %v\n", *keyOut)
 		return
 	}
 
@@ -107,6 +119,22 @@ func parseKey(s string) ([]byte, error) {
 		return nil, fmt.Errorf("-key must be 32 bytes (64 hex chars), got %d bytes", len(key))
 	}
 	return key, nil
+}
+
+// genKeyFile generates a fresh key and writes it, hex-encoded with a
+// trailing newline, to path with mode 0600 on Unix. On Windows the
+// mode argument is inert; restrict the file with icacls instead. It
+// returns the hex string, so callers can verify what was written.
+func genKeyFile(path string) (string, error) {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return "", fmt.Errorf("generating key: %v", err)
+	}
+	hexStr := hex.EncodeToString(key)
+	if err := os.WriteFile(path, []byte(hexStr+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	return hexStr, nil
 }
 
 func newGCM(key []byte) (cipher.AEAD, error) {
