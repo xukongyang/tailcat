@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -104,7 +105,13 @@ func clientCPMode(recursive, preserve bool, portOrIPPort string, args []string) 
 	if err != nil {
 		log.Fatalf("no scp found in $PATH: %v", err)
 	}
-	proxyCommand, err := sshProxyCommand(exe, *flagKey, *flagDERPMapURL, *flagDERPMapKey, addr, portOrIPPort)
+	if *flagDERPMapKeyStdin {
+		return fmt.Errorf("--derpmap-key-stdin can't be used with scp: stdin belongs to the session; use --derpmap-key-file instead")
+	}
+	if *flagDERPMapURLFD >= 0 || *flagDERPMapURLStdin {
+		return fmt.Errorf("--derpmap-url-fd and --derpmap-url-stdin can't be used with scp: OpenSSH owns the pipe; use --derpmap-url with a URL or file path instead")
+	}
+	proxyCommand, err := sshProxyCommand(exe, *flagKey, *flagDERPMapURL, derpMapKeyFlag(), *flagDERPMapKeyFile, addr, portOrIPPort)
 	if err != nil {
 		return err
 	}

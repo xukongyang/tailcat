@@ -113,7 +113,13 @@ func clientSSHMode(portOrIPPort string, skipDNSCheck bool, args []string) error 
 	if sshUser != "" {
 		sshDst = sshUser + "@" + sshDst
 	}
-	proxyCommand, err := sshProxyCommand(exe, *flagKey, *flagDERPMapURL, *flagDERPMapKey, addrStr, portOrIPPort)
+	if *flagDERPMapKeyStdin {
+		return fmt.Errorf("--derpmap-key-stdin can't be used with ssh: stdin belongs to the session; use --derpmap-key-file instead")
+	}
+	if *flagDERPMapURLFD >= 0 || *flagDERPMapURLStdin {
+		return fmt.Errorf("--derpmap-url-fd and --derpmap-url-stdin can't be used with ssh: OpenSSH owns the pipe; use --derpmap-url with a URL or file path instead")
+	}
+	proxyCommand, err := sshProxyCommand(exe, *flagKey, *flagDERPMapURL, derpMapKeyFlag(), *flagDERPMapKeyFile, addrStr, portOrIPPort)
 	if err != nil {
 		return err
 	}
@@ -253,8 +259,11 @@ func probeStrangerSSH(ctx context.Context, logf logger.Logf, derpMapURL, addr, p
 
 // sshProxyCommand returns the command passed to OpenSSH to connect the SSH
 // client to a tailcat server. The command is run by OpenSSH, so values that
-// can contain shell-special characters must be quoted.
-func sshProxyCommand(exe, keyName, derpMapURL, derpMapKey, addr, portOrIPPort string) (string, error) {
+// can contain shell-special characters must be quoted. A key file wins over
+// an in-memory key: the ProxyCommand string lands in OpenSSH's own command
+// line, visible to process enumeration, so only the file's path should
+// travel through it, never the key itself.
+func sshProxyCommand(exe, keyName, derpMapURL, derpMapKey, derpMapKeyFile, addr, portOrIPPort string) (string, error) {
 	args := []string{exe}
 	// No --key flag at all when unset: ff parses --key= by consuming the
 	// tailcat address as the flag's value.
@@ -264,7 +273,10 @@ func sshProxyCommand(exe, keyName, derpMapURL, derpMapKey, addr, portOrIPPort st
 	if derpMapURL != tailcat.DefaultDERPMapURL {
 		args = append(args, "--derpmap-url="+derpMapURL)
 	}
-	if derpMapKey != "" {
+	switch {
+	case derpMapKeyFile != "":
+		args = append(args, "--derpmap-key-file="+derpMapKeyFile)
+	case derpMapKey != "":
 		args = append(args, "--derpmap-key="+derpMapKey)
 	}
 	args = append(args, addr, portOrIPPort)
