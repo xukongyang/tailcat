@@ -1652,3 +1652,40 @@ func TestFetchDERPMapInlineBase64(t *testing.T) {
 		t.Error("empty base64 payload succeeded; want an error")
 	}
 }
+
+// TestFetchDERPMapBytes verifies the DERPMapBytes option: raw map
+// bytes (plain or encrypted, decrypting when a key is set) are used
+// directly, with no network and no cache, in both FetchDERPMap and
+// ConnInfo.Expand.
+func TestFetchDERPMapBytes(t *testing.T) {
+	key := bytes.Repeat([]byte{0x2a}, 32)
+	plain := []byte(`{"Regions":{"6":{"RegionID":6}}}`)
+	check := func(t *testing.T, dm *tailcfg.DERPMap, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id := dm.Regions[6].RegionID; id != 6 {
+			t.Fatalf("RegionID = %d; want 6", id)
+		}
+	}
+
+	dm, err := FetchDERPMap(context.Background(), DERPMapBytes(plain))
+	check(t, dm, err)
+
+	dm, err = FetchDERPMap(context.Background(),
+		DERPMapBytes(testEncryptDERPMap(t, plain, key)), DERPMapKey(hex.EncodeToString(key)))
+	check(t, dm, err)
+
+	if _, err := FetchDERPMap(context.Background(), DERPMapBytes(testEncryptDERPMap(t, plain, key))); err == nil {
+		t.Error("encrypted bytes without a key succeeded; want an error")
+	}
+
+	ci := &ConnInfo{RegionID: 6}
+	if err := ci.Expand(context.Background(), DERPMapBytes(plain)); err != nil {
+		t.Fatal(err)
+	}
+	if len(ci.Region) != 1 || ci.Region[0].RegionID != 6 {
+		t.Errorf("Expand with bytes got region %v; want region 6", ci.Region)
+	}
+}

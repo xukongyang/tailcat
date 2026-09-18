@@ -28,10 +28,17 @@
   server if it isn't running yet.
 - The DERP map fetched from `--derpmap-url` may be encrypted: the new
   `derpmap-encrypt` command encrypts a JSON DERP map with AES-256-GCM,
-  and both sides decrypt it with `--derpmap-key` (default from the
-  `TAILCAT_DERPMAP_KEY` environment variable). The `--derpmap-url`
+  and both sides decrypt it with a hex key. The key can come from
+  `--derpmap-key`, from `--derpmap-key-file` (Unix rejects
+  group/world-readable files), from a descriptor via
+  `--derpmap-key-fd` (Unix), or from a pipe via `--derpmap-key-stdin`
+  (Unix and Windows alike), keeping it out of the command line, the
+  environment, and (with the fd or stdin) the disk;
+  `derpmap-encrypt -genkey -o <file>` writes one. The `--derpmap-url`
   source may also be a local file (bare path or `file://` URL,
-  re-read on every use) or a `base64:`-prefixed inline payload.
+  re-read on every use), a `base64:`-prefixed inline payload, or the
+  payload itself read from a descriptor via `--derpmap-url-fd` or a
+  pipe via `--derpmap-url-stdin` (Unix and Windows alike).
 - `tailcat forward` takes an `--open-browser` flag that opens a web
   browser to the forwarded local port; `tailcat browse <tc-addr>` is
   an alias for `tailcat forward --open-browser <tc-addr> 0:80`.

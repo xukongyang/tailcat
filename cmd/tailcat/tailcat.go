@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/tls"
@@ -61,7 +62,12 @@ var (
 	flagFullAddress       *bool
 	flagJSON              *bool
 	flagDERPMapURL        *string
+	flagDERPMapURLFD      *int
+	flagDERPMapURLStdin   *bool
 	flagDERPMapKey        *string
+	flagDERPMapKeyFile    *string
+	flagDERPMapKeyFD      *int
+	flagDERPMapKeyStdin   *bool
 )
 
 var serveFS *ff.FlagSet
@@ -98,7 +104,12 @@ func newRootCommand() *ff.Command {
 	flagVerbose = rootFS.BoolLong("verbose", "be verbose")
 	flagJSON = rootFS.BoolLong("json", "in server mode, write {\"listenAddr\": ...} JSON to stdout")
 	flagDERPMapURL = rootFS.StringLong("derpmap-url", cmp.Or(os.Getenv("TAILCAT_DERPMAP_URL"), tailcat.DefaultDERPMapURL), "URL, local file path, file:// URL, or base64:-prefixed inline payload of the JSON DERP map used to resolve or auto-select a DERP region; its default can also be set with the TAILCAT_DERPMAP_URL environment variable")
+	flagDERPMapURLFD = rootFS.IntLong("derpmap-url-fd", -1, "file descriptor to read the JSON DERP map payload from (plain-text or encrypted per --derpmap-key), e.g. an anonymous pipe set up by the parent process")
+	flagDERPMapURLStdin = rootFS.BoolLong("derpmap-url-stdin", "read the JSON DERP map payload from stdin (a pipe or redirection, not a terminal); the same on Unix and Windows")
 	flagDERPMapKey = rootFS.StringLong("derpmap-key", os.Getenv("TAILCAT_DERPMAP_KEY"), "hex-encoded 32-byte AES key (as printed by derpmap-encrypt -genkey) used to decrypt the DERP map fetched from --derpmap-url; its default can also be set with the TAILCAT_DERPMAP_KEY environment variable")
+	flagDERPMapKeyFile = rootFS.StringLong("derpmap-key-file", os.Getenv("TAILCAT_DERPMAP_KEY_FILE"), "file holding the hex-encoded --derpmap-key value; on Unix the file must not be group- or world-readable")
+	flagDERPMapKeyFD = rootFS.IntLong("derpmap-key-fd", -1, "file descriptor to read the hex-encoded --derpmap-key value from, e.g. an anonymous pipe set up by the parent process, keeping the key out of the command line and the environment")
+	flagDERPMapKeyStdin = rootFS.BoolLong("derpmap-key-stdin", "read the hex-encoded --derpmap-key value from stdin (a pipe or redirection, not a terminal), the form that works the same on Unix and Windows")
 
 	serveFS = ff.NewFlagSet("serve").SetParent(rootFS)
 	flagAllow = serveFS.StringLong("allow", "", "comma-separated list of public keys to allow access to the server, or 'none' to allow no clients. If empty, all clients are allowed.")
@@ -423,7 +434,9 @@ Environment:
 
 	TAILCAT_DERPMAP_URL: the default value of the --derpmap-url flag.
 
-	TAILCAT_DERPMAP_KEY: the default value of the --derpmap-key flag.`
+	TAILCAT_DERPMAP_KEY: the default value of the --derpmap-key flag.
+
+	TAILCAT_DERPMAP_KEY_FILE: the default value of the --derpmap-key-file flag. Prefer it or --derpmap-key-fd over --derpmap-key, which exposes the key in the process listing.`
 
 const serveLongHelp = `Run a tailcat server, printing its tailcat address for clients to
 connect to. Running tailcat with no arguments is the same as running
@@ -660,6 +673,16 @@ func main() {
 		return
 	}
 	if err == nil {
+		// Validate the key and map source flags up front, so a
+		// conflicting configuration fails on every subcommand, not
+		// just the ones that happen to need them. The sources
+		// themselves are read lazily, where stdin isn't reserved.
+		if n := derpMapKeySourceCount(); n > 1 {
+			log.Fatal("tailcat: use only one of --derpmap-key, --derpmap-key-file, --derpmap-key-fd, and --derpmap-key-stdin")
+		}
+		if n := derpMapSourceCount(); n > 1 {
+			log.Fatal("tailcat: use only one of --derpmap-url, --derpmap-url-fd, and --derpmap-url-stdin")
+		}
 		if *flagVerbose {
 			tailcat.Verbose = true
 		}
@@ -807,15 +830,233 @@ func clientKey() key.NodePrivate {
 	return conf.Private
 }
 
+// resolveDerpMapKey returns the DERP map key from whichever of the
+// sources carries it: the --derpmap-key value, the file named by
+// --derpmap-key-file, the descriptor named by --derpmap-key-fd, or
+// stdin (a non-nil reader stands for --derpmap-key-stdin). Giving
+// more than one is an error. The file, fd, and stdin forms keep the
+// key out of the command line and the environment; the fd form
+// additionally keeps it off disk. stdin works the same on Unix and
+// Windows, unlike the fd form.
+func resolveDerpMapKey(key, keyFile string, keyFD int, stdin io.Reader) (string, error) {
+	sources := 0
+	for _, set := range []bool{key != "", keyFile != "", keyFD >= 0, stdin != nil} {
+		if set {
+			sources++
+		}
+	}
+	if sources > 1 {
+		return "", errors.New("use only one of --derpmap-key, --derpmap-key-file, --derpmap-key-fd, and --derpmap-key-stdin")
+	}
+	switch {
+	case stdin != nil:
+		b, err := io.ReadAll(io.LimitReader(stdin, 1<<10))
+		if err != nil {
+			return "", err
+		}
+		if s := strings.TrimSpace(string(b)); s != "" {
+			return s, nil
+		}
+		return "", errors.New("no key found on stdin")
+	case keyFile != "":
+		fi, err := os.Stat(keyFile)
+		if err != nil {
+			return "", err
+		}
+		if runtime.GOOS != "windows" && fi.Mode().Perm()&0o077 != 0 {
+			return "", fmt.Errorf("%v: permissions %v allow group or other access; chmod 600 it first", keyFile, fi.Mode().Perm())
+		}
+		b, err := os.ReadFile(keyFile)
+		if err != nil {
+			return "", err
+		}
+		s := strings.TrimSpace(string(b))
+		if s == "" {
+			return "", fmt.Errorf("%v contains no key", keyFile)
+		}
+		return s, nil
+	case keyFD >= 0:
+		f := os.NewFile(uintptr(keyFD), "--derpmap-key-fd")
+		if f == nil {
+			return "", fmt.Errorf("--derpmap-key-fd %d is not an open descriptor", keyFD)
+		}
+		defer f.Close()
+		b, err := io.ReadAll(io.LimitReader(f, 1<<10))
+		if err != nil {
+			return "", err
+		}
+		s := strings.TrimSpace(string(b))
+		if s == "" {
+			return "", errors.New("--derpmap-key-fd delivered no key")
+		}
+		return s, nil
+	default:
+		return key, nil
+	}
+}
+
+// resolveDerpMapSource returns the DERP map source from whichever of
+// the three forms carries it: the --derpmap-url value, the descriptor
+// named by --derpmap-url-fd, or stdin (a non-nil reader stands for
+// --derpmap-url-stdin). The flag's default URL counts as unset: only
+// an explicitly different URL conflicts with the other two. The
+// returned bytes are the raw payload, plain-text or encrypted per
+// --derpmap-key; the returned URL is empty when bytes are present.
+func resolveDerpMapSource(url string, urlFD int, stdin io.Reader) (string, []byte, error) {
+	sources := 0
+	for _, set := range []bool{url != tailcat.DefaultDERPMapURL, urlFD >= 0, stdin != nil} {
+		if set {
+			sources++
+		}
+	}
+	if sources > 1 {
+		return "", nil, errors.New("use only one of --derpmap-url, --derpmap-url-fd, and --derpmap-url-stdin")
+	}
+	read := func(r io.Reader, name string) ([]byte, error) {
+		b, err := io.ReadAll(io.LimitReader(r, 8<<20))
+		if err != nil {
+			return nil, err
+		}
+		if len(bytes.TrimSpace(b)) == 0 {
+			return nil, fmt.Errorf("no DERP map content on %s", name)
+		}
+		return b, nil
+	}
+	switch {
+	case stdin != nil:
+		data, err := read(stdin, "--derpmap-url-stdin")
+		return "", data, err
+	case urlFD >= 0:
+		f := os.NewFile(uintptr(urlFD), "--derpmap-url-fd")
+		if f == nil {
+			return "", nil, fmt.Errorf("--derpmap-url-fd %d is not an open descriptor", urlFD)
+		}
+		defer f.Close()
+		data, err := read(f, "--derpmap-url-fd")
+		return "", data, err
+	default:
+		return url, nil, nil
+	}
+}
+
+// derpMapKeyFlag resolves the DERP map key flags once and returns the
+// key, exiting with a usage error if the flags conflict or the
+// source can't be read. Only call it where stdin isn't reserved for
+// something else (not the ssh and cp modes, whose stdin belongs to
+// the session); main validates conflicts up front for every
+// subcommand.
+func derpMapKeyFlag() string {
+	derpMapKeyOnce.Do(func() {
+		var stdin io.Reader
+		if *flagDERPMapKeyStdin {
+			fi, err := os.Stdin.Stat()
+			if err != nil {
+				derpMapKeyErr = err
+				return
+			}
+			if fi.Mode()&os.ModeCharDevice != 0 {
+				derpMapKeyErr = errors.New("--derpmap-key-stdin: stdin is a terminal; pipe the key in instead, e.g. echo -n $KEY | tailcat --derpmap-key-stdin ...")
+				return
+			}
+			stdin = os.Stdin
+		}
+		derpMapKeyVal, derpMapKeyErr = resolveDerpMapKey(*flagDERPMapKey, *flagDERPMapKeyFile, *flagDERPMapKeyFD, stdin)
+	})
+	if derpMapKeyErr != nil {
+		log.Fatalf("tailcat: %v", derpMapKeyErr)
+	}
+	return derpMapKeyVal
+}
+
+// derpMapKeySourceCount reports how many of the four DERP map key
+// sources are configured.
+func derpMapKeySourceCount() int {
+	n := 0
+	for _, set := range []bool{*flagDERPMapKey != "", *flagDERPMapKeyFile != "", *flagDERPMapKeyFD >= 0, *flagDERPMapKeyStdin} {
+		if set {
+			n++
+		}
+	}
+	return n
+}
+
+var (
+	derpMapKeyOnce sync.Once
+	derpMapKeyVal  string
+	derpMapKeyErr  error
+)
+
+// derpMapSourceFlag resolves the DERP map source flags once,
+// returning either a URL (possibly empty when bytes are present) or
+// the map payload bytes. It exits with a usage error if the flags
+// conflict or the source can't be read. Only call it where stdin
+// isn't reserved for something else (not the ssh and cp modes, whose
+// stdin belongs to the session).
+func derpMapSourceFlag() (string, []byte) {
+	derpMapSourceOnce.Do(func() {
+		var stdin io.Reader
+		if *flagDERPMapURLStdin {
+			fi, err := os.Stdin.Stat()
+			if err != nil {
+				derpMapSourceErr = err
+				return
+			}
+			if fi.Mode()&os.ModeCharDevice != 0 {
+				derpMapSourceErr = errors.New("--derpmap-url-stdin: stdin is a terminal; pipe the DERP map in instead")
+				return
+			}
+			stdin = os.Stdin
+		}
+		derpMapSourceURL, derpMapSourceBytes, derpMapSourceErr = resolveDerpMapSource(*flagDERPMapURL, *flagDERPMapURLFD, stdin)
+	})
+	if derpMapSourceErr != nil {
+		log.Fatalf("tailcat: %v", derpMapSourceErr)
+	}
+	return derpMapSourceURL, derpMapSourceBytes
+}
+
+var (
+	derpMapSourceOnce  sync.Once
+	derpMapSourceURL   string
+	derpMapSourceBytes []byte
+	derpMapSourceErr   error
+)
+
+// derpMapSourceCount reports how many of the three DERP map sources
+// are configured.
+func derpMapSourceCount() int {
+	n := 0
+	for _, set := range []bool{*flagDERPMapURL != tailcat.DefaultDERPMapURL, *flagDERPMapURLFD >= 0, *flagDERPMapURLStdin} {
+		if set {
+			n++
+		}
+	}
+	return n
+}
+
+// derpMapOpts returns the options naming the DERP map source (bytes
+// when --derpmap-url-fd or --derpmap-url-stdin provided the payload,
+// otherwise the URL) and its decryption key.
+func derpMapOpts() []any {
+	url, data := derpMapSourceFlag()
+	if len(data) > 0 {
+		return []any{tailcat.DERPMapBytes(data), tailcat.DERPMapKey(derpMapKeyFlag())}
+	}
+	return []any{tailcat.DERPMapURL(url), tailcat.DERPMapKey(derpMapKeyFlag())}
+}
+
 // newClient returns a [tailcat.Client] configured with the global
-// --derpmap-url flag and the disk DERP map cache.
+// --derpmap-url flag (or its fd/stdin alternatives) and the disk DERP
+// map cache.
 func newClient(logf logger.Logf, addr tailcat.Addr, priv key.NodePrivate) *tailcat.Client {
+	url, data := derpMapSourceFlag()
 	return &tailcat.Client{
 		Server:       addr,
 		Key:          priv,
 		Logf:         logf,
-		DERPMapURL:   *flagDERPMapURL,
-		DERPMapKey:   *flagDERPMapKey,
+		DERPMapURL:   url,
+		DERPMapBytes: data,
+		DERPMapKey:   derpMapKeyFlag(),
 		DERPMapCache: derpMapCache{},
 	}
 }
@@ -1202,7 +1443,8 @@ func clientResolveMode(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	resolved, err := tailcatAddrArg(args[0]).Resolve(ctx, tailcat.DERPMapURL(*flagDERPMapURL), tailcat.DERPMapKey(*flagDERPMapKey), derpMapCache{})
+	opts := append(derpMapOpts(), derpMapCache{})
+	resolved, err := tailcatAddrArg(args[0]).Resolve(ctx, opts...)
 	if err != nil {
 		return err
 	}
@@ -1357,7 +1599,8 @@ func server(logf logger.Logf, serveSpec string, execArgs []string) {
 		// zeroes RegionID when it populates Region.
 		embed := *flagFullAddress || len(ci.Region) > 0
 
-		if err := ci.Expand(context.Background(), tailcat.ExpandForServer, tailcat.DERPMapURL(*flagDERPMapURL), tailcat.DERPMapKey(*flagDERPMapKey), derpMapCache{}); err != nil {
+		opts := append(derpMapOpts(), tailcat.ExpandForServer, derpMapCache{})
+		if err := ci.Expand(context.Background(), opts...); err != nil {
 			log.Fatalf("Expand: %v", err)
 		}
 		reg = ci.Region[0]
@@ -1919,7 +2162,8 @@ func genKey(args []string) error {
 	if match != "" || *region == "" || *embedDERPMap {
 		// genkey picks the region a future server will listen on,
 		// hence ExpandForServer.
-		got, err := tailcat.FetchDERPMap(ctx, tailcat.DERPMapURL(*flagDERPMapURL), tailcat.DERPMapKey(*flagDERPMapKey), tailcat.ExpandForServer, derpMapCache{})
+		opts := append(derpMapOpts(), tailcat.ExpandForServer, derpMapCache{})
+		got, err := tailcat.FetchDERPMap(ctx, opts...)
 		if err != nil {
 			log.Fatalf("derpmap fetch: %v", err)
 		}

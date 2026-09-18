@@ -139,7 +139,7 @@ func TestServeSSHInteractive(t *testing.T) {
 		t.Fatalf("ssh-keygen: %v\n%s", err, out)
 	}
 	_, addr, _ := e.startServer("serve", "--ssh-authorized-keys="+keyPath+".pub", "ssh")
-	proxyCommand, err := sshProxyCommand(e.bin, "new", e.derpMapURL, "", addr, "22")
+	proxyCommand, err := sshProxyCommand(e.bin, "new", e.derpMapURL, "", "", addr, "22")
 	if err != nil {
 		t.Fatal(err)
 	}

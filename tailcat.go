@@ -124,6 +124,14 @@ type DERPMapURL string
 // including no option at all, means the DERP map is plain-text JSON.
 type DERPMapKey string
 
+// DERPMapBytes is an option for [ConnInfo.Expand] and
+// [FetchDERPMap] supplying the DERP map payload itself, with no
+// network access at all: the bytes a caller read from a pipe, a
+// descriptor, or memory. It may be plain-text JSON or
+// derpmap-encrypt ciphertext (decrypted with [DERPMapKey]). It
+// conflicts with [DERPMapURL].
+type DERPMapBytes []byte
+
 // DERPMapCache is an option for [ConnInfo.Expand] and [FetchDERPMap]
 // that caches fetched DERP maps. Without one, a process-wide
 // in-memory cache is used; provide an implementation (like the
@@ -454,6 +462,11 @@ type Server struct {
 	// empty, [DefaultDERPMapURL] is used.
 	DERPMapURL string
 
+	// DERPMapBytes, if non-empty, is the DERP map payload itself
+	// ([DERPMapBytes]), used instead of fetching anything. It
+	// conflicts with DERPMapURL. It must be set before Start.
+	DERPMapBytes []byte
+
 	// DERPMapKey, if non-empty, is the hex-encoded key ([DERPMapKey])
 	// used to decrypt the fetched DERP map. It must be set before
 	// Start.
@@ -620,6 +633,9 @@ func (s *Server) startLocked(ctx context.Context) error {
 		opts := []any{ExpandForServer}
 		if s.DERPMapURL != "" {
 			opts = append(opts, DERPMapURL(s.DERPMapURL))
+		}
+		if len(s.DERPMapBytes) > 0 {
+			opts = append(opts, DERPMapBytes(s.DERPMapBytes))
 		}
 		if s.DERPMapKey != "" {
 			opts = append(opts, DERPMapKey(s.DERPMapKey))
@@ -1209,6 +1225,7 @@ func ParseAddr(addr Addr) (ConnInfo, error) {
 // contain any of the following types:
 //   - [DERPMapURL]: fetch from an alternate URL instead of
 //     [DefaultDERPMapURL].
+//   - [DERPMapBytes]: use the given payload directly.
 //   - [DERPMapKey]: decrypt the fetched DERP map with the given key.
 //   - [ExpandForServer]: mark the fetch as being on behalf of a
 //     tailcat server rather than a client.
@@ -1218,11 +1235,14 @@ func FetchDERPMap(ctx context.Context, opts ...any) (*tailcfg.DERPMap, error) {
 	fetchURL := DefaultDERPMapURL
 	mode := "client"
 	var derpMapKey DERPMapKey
+	var derpMapData DERPMapBytes
 	var cache DERPMapCache
 	for _, opt := range opts {
 		switch v := opt.(type) {
 		case DERPMapURL:
 			fetchURL = string(v)
+		case DERPMapBytes:
+			derpMapData = v
 		case DERPMapKey:
 			derpMapKey = v
 		case expandForServer:
@@ -1233,7 +1253,28 @@ func FetchDERPMap(ctx context.Context, opts ...any) (*tailcfg.DERPMap, error) {
 			return nil, fmt.Errorf("unknown FetchDERPMap option type %T", opt)
 		}
 	}
+	if len(derpMapData) > 0 {
+		return decodeDERPMapPayload(derpMapData, string(derpMapKey))
+	}
 	return fetchDERPMap(ctx, fetchURL, mode, derpMapKey, cache)
+}
+
+// decodeDERPMapPayload turns raw DERP map bytes (plain-text JSON, or
+// derpmap-encrypt ciphertext when keyHex is set) into a DERP map.
+func decodeDERPMapPayload(data []byte, keyHex string) (*tailcfg.DERPMap, error) {
+	key, err := parseDERPMapKey(keyHex)
+	if err != nil {
+		return nil, err
+	}
+	plain, err := decryptDERPMap(data, key)
+	if err != nil {
+		return nil, fmt.Errorf("decrypting DERP map: %w", err)
+	}
+	dm := decodeDERPMap(plain)
+	if dm == nil {
+		return nil, errors.New("invalid DERP map JSON")
+	}
+	return dm, nil
 }
 
 // memDERPMapCache is a process-wide in-memory [DERPMapCache], the
@@ -1500,6 +1541,8 @@ func decryptDERPMap(data, key []byte) ([]byte, error) {
 // The opts may contain any of the following types:
 //   - [DERPMapURL]: fetch the DERP map from an alternate URL instead
 //     of [DefaultDERPMapURL].
+//   - [DERPMapBytes]: expand from the given payload instead of
+//     fetching one over the network.
 //   - [DERPMapKey]: decrypt the fetched DERP map with the given key.
 //   - [*tailcfg.DERPMap]: expand from the provided DERP map instead
 //     of fetching one over the network.
@@ -1512,11 +1555,14 @@ func (ci *ConnInfo) Expand(ctx context.Context, opts ...any) error {
 	mode := "client"
 	var dm *tailcfg.DERPMap
 	var derpMapKey DERPMapKey
+	var derpMapData DERPMapBytes
 	var cache DERPMapCache
 	for _, opt := range opts {
 		switch v := opt.(type) {
 		case DERPMapURL:
 			fetchURL = string(v)
+		case DERPMapBytes:
+			derpMapData = v
 		case DERPMapKey:
 			derpMapKey = v
 		case *tailcfg.DERPMap:
@@ -1527,6 +1573,13 @@ func (ci *ConnInfo) Expand(ctx context.Context, opts ...any) error {
 			cache = v
 		default:
 			return fmt.Errorf("unknown Expand option type %T", opt)
+		}
+	}
+	if dm == nil && len(derpMapData) > 0 {
+		var err error
+		dm, err = decodeDERPMapPayload(derpMapData, string(derpMapKey))
+		if err != nil {
+			return err
 		}
 	}
 	for _, r := range ci.Region {
@@ -2018,6 +2071,12 @@ type Client struct {
 	// client's first use.
 	DERPMapURL string
 
+	// DERPMapBytes, if non-empty, is the DERP map payload itself
+	// ([DERPMapBytes]), used instead of fetching anything. It
+	// conflicts with DERPMapURL. If set, it must be set before the
+	// client's first use.
+	DERPMapBytes []byte
+
 	// DERPMapKey, if non-empty, is the hex-encoded key ([DERPMapKey])
 	// used to decrypt the fetched DERP map. If set, it must be set
 	// before the client's first use.
@@ -2217,6 +2276,9 @@ func (c *Client) ensureStarted(ctx context.Context) error {
 	var opts []any
 	if c.DERPMapURL != "" {
 		opts = append(opts, DERPMapURL(c.DERPMapURL))
+	}
+	if len(c.DERPMapBytes) > 0 {
+		opts = append(opts, DERPMapBytes(c.DERPMapBytes))
 	}
 	if c.DERPMapKey != "" {
 		opts = append(opts, DERPMapKey(c.DERPMapKey))
