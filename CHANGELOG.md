@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Private DERP admission control: tailcat can send a username and a
+  time-limited token in the ClientInfo when dialing DERP servers
+  (requires a derper built from the auth-patch branch of our
+  tailscale fork, which forwards them to its --verify-client-url
+  admission controller). The token comes from --derp-auth-token,
+  --derp-auth-token-file, or — with --derp-auth-secret and its
+  -file, -fd, and -stdin forms — is computed and rotated
+  automatically as HMAC-SHA256(secret, username:window), matching
+  the admit command.
 - **Breaking Go API change:** `Server.AllowedClients` and
   `Server.AddAllowedClient` are replaced by the `Server.AllowClient`
   hook, a `func(key.NodePublic) bool` asked about each client as it
@@ -37,6 +46,7 @@
   `8080:80` to a different port on localhost, instead of always the
   same port on localhost. This exposes one LAN service without the
   whole network that `exit-node` would.
+
 - `--serve=exit-node` servers now forward UDP flows; previously only
   TCP was forwarded, so DNS, QUIC, and other UDP traffic through an
   exit node went nowhere.

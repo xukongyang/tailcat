@@ -154,3 +154,75 @@ func TestResolveDerpMapSource(t *testing.T) {
 		t.Error("whitespace-only stdin succeeded; want an error")
 	}
 }
+
+func TestResolveDerpAuth(t *testing.T) {
+	dir := t.TempDir()
+	// All secret sources: value, file, descriptor, and stdin. The
+	// fd and stdin forms match --derpmap-key-fd/--derpmap-key-stdin.
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pw.WriteString("sec-from-pipe\n"); err != nil {
+		t.Fatal(err)
+	}
+	pw.Close()
+	defer pr.Close()
+	tokenPath := filepath.Join(dir, "auth-token")
+	if err := os.WriteFile(tokenPath, []byte("tok-123\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secretPath := filepath.Join(dir, "auth-secret")
+	if err := os.WriteFile(secretPath, []byte("sec-456\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := resolveDerpAuth("tok-abc", "", "sec-xyz", "", -1, nil); err == nil {
+		t.Error("token and secret together succeeded; want an error")
+	}
+	// token/token-file are exclusive; secret/secret-file are exclusive.
+	if _, _, err := resolveDerpAuth("tok", tokenPath, "", "", -1, nil); err == nil {
+		t.Error("token and token-file together succeeded; want an error")
+	}
+	if _, _, err := resolveDerpAuth("", "", "sec", secretPath, -1, nil); err == nil {
+		t.Error("secret and secret-file together succeeded; want an error")
+	}
+	if _, _, err := resolveDerpAuth("", "", "sec", "", int(pr.Fd()), nil); err == nil {
+		t.Error("secret and fd together succeeded; want an error")
+	}
+	if _, _, err := resolveDerpAuth("", "", "", secretPath, -1, strings.NewReader("x")); err == nil {
+		t.Error("file and stdin together succeeded; want an error")
+	}
+	if _, _, err := resolveDerpAuth("", "", "", "", int(pr.Fd()), strings.NewReader("x")); err == nil {
+		t.Error("fd and stdin together succeeded; want an error")
+	}
+	// The token pair and the secret pair are mutually exclusive.
+	if _, _, err := resolveDerpAuth("tok", "", "sec", "", -1, nil); err == nil {
+		t.Error("token and secret together succeeded; want an error")
+	}
+	if _, _, err := resolveDerpAuth("", "", "sec", secretPath, -1, nil); err == nil {
+		t.Error("token and secret-file together succeeded; want an error")
+	}
+	// The fd and stdin forms read and trim like the file form.
+	if _, sec, err := resolveDerpAuth("", "", "", "", int(pr.Fd()), nil); err != nil || sec != "sec-from-pipe" {
+		t.Errorf("secret-fd = (%q, %v); want sec-from-pipe", sec, err)
+	}
+	if _, sec, err := resolveDerpAuth("", "", "", "", -1, strings.NewReader("sec-from-stdin\n")); err != nil || sec != "sec-from-stdin" {
+		t.Errorf("secret-stdin = (%q, %v); want sec-from-stdin", sec, err)
+	}
+	if _, _, err := resolveDerpAuth("", "", "", "", -1, strings.NewReader("  \n")); err == nil {
+		t.Error("whitespace-only stdin succeeded; want an error")
+	}
+	// Nothing given means no admission credentials.
+	if tok, sec, err := resolveDerpAuth("", "", "", "", -1, nil); err != nil || tok != "" || sec != "" {
+		t.Errorf("no source = (%q, %q, %v); want empty", tok, sec, err)
+	}
+	// A secret file is read and trimmed.
+	if _, sec, err := resolveDerpAuth("", "", "", secretPath, -1, nil); err != nil || sec != "sec-456" {
+		t.Errorf("secret-file = (%q, %v); want sec-456", sec, err)
+	}
+	// A missing file reports the error.
+	if _, _, err := resolveDerpAuth("", "", "", filepath.Join(dir, "nope"), -1, nil); err == nil {
+		t.Error("missing secret file succeeded; want an error")
+	}
+}
