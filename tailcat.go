@@ -360,6 +360,9 @@ type locoBackend struct {
 	addrPrefix     netip.Prefix
 	ns             *netstack.Impl
 	dm             *tailcfg.DERPMap
+	derpAuthUser   string // optional; admission credentials for private DERP servers
+	derpAuthToken  string
+	derpAuthSecret string // optional; if set, tokens are computed and rotated automatically
 	logf           logger.Logf
 	serverPub      key.NodePublic  // non-zero if we're a client (server's public key)
 	serverDiscoPub key.DiscoPublic // non-zero if we're a client (server's disco key)
@@ -466,6 +469,23 @@ type Server struct {
 	// ([DERPMapBytes]), used instead of fetching anything. It
 	// conflicts with DERPMapURL. It must be set before Start.
 	DERPMapBytes []byte
+
+	// DerpAuthUser and DerpAuthToken, if non-empty, are admission
+	// credentials for private DERP servers: they are sent in the
+	// ClientInfo (sealed to the server's key) and forwarded by the
+	// server to its admission controller, e.g. one run with the
+	// admit command from the derp workspace. They must be set
+	// before Start.
+	DerpAuthUser  string
+	DerpAuthToken string
+
+	// DerpAuthSecret, if non-empty (and conflicting with
+	// DerpAuthToken), is the user's admission secret: the token is
+	// computed as HMAC-SHA256(secret, username:window) — the same
+	// algorithm the admit command checks — and rotated automatically
+	// once a minute for as long as the server runs. It must be set
+	// before Start.
+	DerpAuthSecret string
 
 	// DERPMapKey, if non-empty, is the hex-encoded key ([DERPMapKey])
 	// used to decrypt the fetched DERP map. It must be set before
@@ -655,6 +675,9 @@ func (s *Server) startLocked(ctx context.Context) error {
 	lb := newLocoBackend(priv, psk)
 	lb.logf = logf
 	lb.dm = &tailcfg.DERPMap{}
+	lb.derpAuthUser = s.DerpAuthUser
+	lb.derpAuthToken = s.DerpAuthToken
+	lb.derpAuthSecret = s.DerpAuthSecret
 	mak.Set(&lb.dm.Regions, reg.RegionID, reg)
 	for _, k := range s.AllowedClients {
 		mak.Set(&lb.allowedClients, k, true)
@@ -1797,6 +1820,52 @@ func nodeHasAddr(n tailcfg.NodeView, ip netip.Addr) bool {
 	return false
 }
 
+// derpAuthWindowSecs is the token validity period used by the admit
+// command; tokens from the current and neighboring windows are
+// accepted by it.
+const derpAuthWindowSecs int64 = 300
+
+// derpAuthRefreshInterval is how often a running backend recomputes
+// its windowed admission token; it is well under the window so a
+// refreshed token is always in or ahead of the current window.
+const derpAuthRefreshInterval = time.Minute
+
+// derpAuthHash returns the hex HMAC-SHA256 of "username:window"
+// under secret. It must match the admit command's algorithm: the
+// admission controller computes the same value for the current
+// window and compares.
+func derpAuthHash(secret []byte, username string, window int64) string {
+	mac := hmac.New(sha256.New, secret)
+	fmt.Fprintf(mac, "%s:%d", username, window)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// startDerpAuth pushes the admission credentials to the magicsock
+// connection. A static --derp-auth-token is pushed once; a
+// --derp-auth-secret starts a goroutine that recomputes the windowed
+// token once a minute for as long as the process lives, so
+// long-running servers and clients survive token rotation without
+// external help.
+func (lb *locoBackend) startDerpAuth() {
+	mc := lb.sys.MagicSock.Get()
+	switch {
+	case lb.derpAuthSecret != "":
+		secret := []byte(lb.derpAuthSecret)
+		update := func() {
+			window := time.Now().Unix() / derpAuthWindowSecs
+			mc.SetDERPAuth(lb.derpAuthUser, derpAuthHash(secret, lb.derpAuthUser, window))
+		}
+		update()
+		go func() {
+			for range time.Tick(derpAuthRefreshInterval) {
+				update()
+			}
+		}()
+	case lb.derpAuthUser != "" || lb.derpAuthToken != "":
+		mc.SetDERPAuth(lb.derpAuthUser, lb.derpAuthToken)
+	}
+}
+
 func (lb *locoBackend) Start() error {
 	if err := lb.ns.Start(nil /* no LocalBackend */); err != nil {
 		return fmt.Errorf("failed to start netstack: %w", err)
@@ -1808,6 +1877,7 @@ func (lb *locoBackend) Start() error {
 
 	mc.SetPrivateKey(lb.priv)
 	mc.SetDERPMap(lb.dm)
+	lb.startDerpAuth()
 
 	derpRegion := lb.derpRegionID()
 
@@ -2077,6 +2147,22 @@ type Client struct {
 	// client's first use.
 	DERPMapBytes []byte
 
+	// DerpAuthUser and DerpAuthToken, if non-empty, are admission
+	// credentials for private DERP servers: they are sent in the
+	// ClientInfo (sealed to the server's key) and forwarded by the
+	// server to its admission controller. If set, they must be set
+	// before the client's first use.
+	DerpAuthUser  string
+	DerpAuthToken string
+
+	// DerpAuthSecret, if non-empty (and conflicting with
+	// DerpAuthToken), is the user's admission secret: the token is
+	// computed as HMAC-SHA256(secret, username:window) — the same
+	// algorithm the admit command checks — and rotated automatically
+	// once a minute for as long as the client lives. If set, it must
+	// be set before the client's first use.
+	DerpAuthSecret string
+
 	// DERPMapKey, if non-empty, is the hex-encoded key ([DERPMapKey])
 	// used to decrypt the fetched DERP map. If set, it must be set
 	// before the client's first use.
@@ -2144,6 +2230,9 @@ func (c *Client) initLocked() error {
 	lb := newLocoBackend(c.nodeKeyLocked(), ci.PresharedKey)
 	lb.logf = logf
 	lb.dm = &tailcfg.DERPMap{}
+	lb.derpAuthUser = c.DerpAuthUser
+	lb.derpAuthToken = c.DerpAuthToken
+	lb.derpAuthSecret = c.DerpAuthSecret
 	lb.serverPub = ci.ServerPublic.NodePublic
 	lb.serverDiscoPub = ci.ServerDiscoPublic.DiscoPublic
 

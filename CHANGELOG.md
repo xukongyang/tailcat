@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Private DERP admission control: tailcat can send a username and a
+  time-limited token in the ClientInfo when dialing DERP servers
+  (requires a derper built from the patched tailscale in the derp
+  workspace, which forwards them to its --verify-client-url
+  admission controller). The token comes from --derp-auth-token,
+  --derp-auth-token-file, or — with --derp-auth-secret and its
+  -file, -fd, and -stdin forms — is computed and rotated
+  automatically as HMAC-SHA256(secret, username:window), matching
+  the admit command.
 - `--serve=exit-node` servers now forward UDP flows; previously only
   TCP was forwarded, so DNS, QUIC, and other UDP traffic through an
   exit node went nowhere.

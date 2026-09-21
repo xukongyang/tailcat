@@ -227,6 +227,8 @@ github.com/vishvananda/netns v0.0.5 h1:DfiHV+j8bA32MFM7bfEunvT8IAqQ/NzSJHtcmW5zd
 github.com/vishvananda/netns v0.0.5/go.mod h1:SpkAiCQRtJ6TvvxPnOSyH3BMl6unz3xZlaprSwhNNJM=
 github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
 github.com/x448/float16 v0.8.4/go.mod h1:14CWIYCyZA/cWjXOioeEpHeN/83MdbZDRQHoFcYsOfg=
+github.com/xukongyang/tailscale v0.0.0-20260921035941-13006c4b1893 h1:2WmknfvHP2M8QjaSPaRcga+zpBuhNLneVurN/Jo63QQ=
+github.com/xukongyang/tailscale v0.0.0-20260921035941-13006c4b1893/go.mod h1:VQOMvttDFq1pZkWMaSaFf+HUWfP5QlZUKLW3dCNzWmc=
 github.com/yuin/goldmark v1.4.13/go.mod h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=
 go.uber.org/goleak v1.2.1 h1:NBol2c7O1ZokfZ0LEU9K6Whx/KnwvepVetCUhtKja4A=
 go.uber.org/goleak v1.2.1/go.mod h1:qlT2yGI9QafXHhZZLxlSuNsMw3FFLxBr+tBRlmO1xH4=
@@ -313,5 +315,3 @@ howett.net/plist v1.0.0 h1:7CrbWYbPPO/PyNy38b2EB/+gYbjCe2DXBxgtOOZbSQM=
 howett.net/plist v1.0.0/go.mod h1:lqaXoTrLY4hg8tnEzNru53gicrbv7rrk+2xJA/7hw9g=
 software.sslmate.com/src/go-pkcs12 v0.4.0 h1:H2g08FrTvSFKUj+D309j1DPfk5APnIdAQAB8aEykJ5k=
 software.sslmate.com/src/go-pkcs12 v0.4.0/go.mod h1:Qiz0EyvDRJjjxGyUQa2cCNZn/wMyzrRJ/qcDXOQazLI=
-tailscale.com v1.103.0-pre.0.20260916030321-a2263542f260 h1:OaZIMrBlm9YUcI6tS5EHCFT1VsayQk2yftUI9LxBV7E=
-tailscale.com v1.103.0-pre.0.20260916030321-a2263542f260/go.mod h1:VQOMvttDFq1pZkWMaSaFf+HUWfP5QlZUKLW3dCNzWmc=

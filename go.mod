@@ -109,3 +109,8 @@ require (
 	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect
 	honnef.co/go/tools v0.8.0-rc.1 // indirect
 )
+
+// Use the auth-patch branch of our tailscale fork, which carries the
+// DERP admission credentials feature; the same sources build the
+// patched derper in the derp workspace.
+replace tailscale.com => github.com/xukongyang/tailscale v0.0.0-20260921035941-13006c4b1893

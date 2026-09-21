@@ -1689,3 +1689,20 @@ func TestFetchDERPMapBytes(t *testing.T) {
 		t.Errorf("Expand with bytes got region %v; want region 6", ci.Region)
 	}
 }
+
+// TestDerpAuthHash pins the token algorithm shared with the admit
+// command: HMAC-SHA256(secret, username:window) in hex. The expected
+// value was computed with openssl for the same inputs.
+func TestDerpAuthHash(t *testing.T) {
+	got := derpAuthHash([]byte("alice-secret"), "alice", 12345)
+	want := "f3ad94d35d595b1f5efeeca7f687d3cd03bac83928c23f22307056a0755b2618"
+	if got != want {
+		t.Errorf("derpAuthHash = %q; want %q", got, want)
+	}
+	if got == derpAuthHash([]byte("alice-secret"), "bob", 12345) {
+		t.Error("derpAuthHash ignores the username")
+	}
+	if got == derpAuthHash([]byte("alice-secret"), "alice", 12346) {
+		t.Error("derpAuthHash ignores the window")
+	}
+}

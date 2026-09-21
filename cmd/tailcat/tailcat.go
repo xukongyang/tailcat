@@ -61,6 +61,13 @@ var (
 	flagVerbose           *bool
 	flagFullAddress       *bool
 	flagJSON              *bool
+	flagDERPAuthUser      *string
+	flagDERPAuthToken     *string
+	flagDERPAuthTokenFile *string
+	flagDERPAuthSecret    *string
+	flagDERPAuthSecretFil *string
+	flagDERPAuthSecretFD  *int
+	flagDERPAuthSecretStd *bool
 	flagDERPMapURL        *string
 	flagDERPMapURLFD      *int
 	flagDERPMapURLStdin   *bool
@@ -103,6 +110,13 @@ func newRootCommand() *ff.Command {
 	flagKey = rootFS.StringLong("key", "", "'new' for an ephemeral key. If empty, the default saved key is used if it exists ('default' in server mode, 'client-default' in client modes; see genkey), else an ephemeral key. Otherwise the path to a *.private.json or a name like 'foo' to read it from $CONFIG/tailcat/keys/foo.private.json")
 	flagVerbose = rootFS.BoolLong("verbose", "be verbose")
 	flagJSON = rootFS.BoolLong("json", "in server mode, write {\"listenAddr\": ...} JSON to stdout")
+	flagDERPAuthUser = rootFS.StringLong("derp-auth-user", os.Getenv("TAILCAT_DERP_AUTH_USER"), "username sent to private DERP servers' admission controllers, alongside --derp-auth-token")
+	flagDERPAuthToken = rootFS.StringLong("derp-auth-token", os.Getenv("TAILCAT_DERP_AUTH_TOKEN"), "token sent to private DERP servers' admission controllers; prefer --derp-auth-token-file, which keeps it out of the process listing")
+	flagDERPAuthTokenFile = rootFS.StringLong("derp-auth-token-file", os.Getenv("TAILCAT_DERP_AUTH_TOKEN_FILE"), "file holding the --derp-auth-token value")
+	flagDERPAuthSecret = rootFS.StringLong("derp-auth-secret", os.Getenv("TAILCAT_DERP_AUTH_SECRET"), "per-user admission secret: tailcat computes and rotates the token itself (HMAC-SHA256 of the username and the time window, matching the admit command); exclusive with --derp-auth-token[-file]")
+	flagDERPAuthSecretFil = rootFS.StringLong("derp-auth-secret-file", os.Getenv("TAILCAT_DERP_AUTH_SECRET_FILE"), "file holding the --derp-auth-secret value; on Unix the file must not be group- or world-readable")
+	flagDERPAuthSecretFD = rootFS.IntLong("derp-auth-secret-fd", -1, "file descriptor to read the --derp-auth-secret value from, e.g. an anonymous pipe set up by the parent process")
+	flagDERPAuthSecretStd = rootFS.BoolLong("derp-auth-secret-stdin", "read the --derp-auth-secret value from stdin (a pipe or redirection, not a terminal); the same on Unix and Windows")
 	flagDERPMapURL = rootFS.StringLong("derpmap-url", cmp.Or(os.Getenv("TAILCAT_DERPMAP_URL"), tailcat.DefaultDERPMapURL), "URL, local file path, file:// URL, or base64:-prefixed inline payload of the JSON DERP map used to resolve or auto-select a DERP region; its default can also be set with the TAILCAT_DERPMAP_URL environment variable")
 	flagDERPMapURLFD = rootFS.IntLong("derpmap-url-fd", -1, "file descriptor to read the JSON DERP map payload from (plain-text or encrypted per --derpmap-key), e.g. an anonymous pipe set up by the parent process")
 	flagDERPMapURLStdin = rootFS.BoolLong("derpmap-url-stdin", "read the JSON DERP map payload from stdin (a pipe or redirection, not a terminal); the same on Unix and Windows")
@@ -830,6 +844,123 @@ func clientKey() key.NodePrivate {
 	return conf.Private
 }
 
+// resolveDerpAuth returns the DERP admission credentials from the
+// two independent groups: a static token (--derp-auth-token or
+// --derp-auth-token-file) and a rotating secret (--derp-auth-secret,
+// --derp-auth-secret-file, --derp-auth-secret-fd, or
+// --derp-auth-secret-stdin). Within each group the forms are
+// exclusive, and giving both a token and a secret is an error: the
+// secret makes tailcat compute rotating tokens itself. A secret file
+// must not be group- or world-readable on Unix.
+func resolveDerpAuth(token, tokenFile, secret, secretFile string, secretFD int, stdin io.Reader) (tokenVal, secretVal string, err error) {
+	if token != "" && tokenFile != "" {
+		return "", "", errors.New("use only one of --derp-auth-token and --derp-auth-token-file")
+	}
+	secretSources := 0
+	for _, set := range []bool{secret != "", secretFile != "", secretFD >= 0, stdin != nil} {
+		if set {
+			secretSources++
+		}
+	}
+	if secretSources > 1 {
+		return "", "", errors.New("use only one of --derp-auth-secret, --derp-auth-secret-file, --derp-auth-secret-fd, and --derp-auth-secret-stdin")
+	}
+	if token != "" && secretSources > 0 {
+		return "", "", errors.New("use either --derp-auth-token[-file] or --derp-auth-secret[-file/-fd/-stdin], not both")
+	}
+	readSecret := func(r io.Reader, name string) (string, error) {
+		b, err := io.ReadAll(io.LimitReader(r, 1<<10))
+		if err != nil {
+			return "", err
+		}
+		s := strings.TrimSpace(string(b))
+		if s == "" {
+			return "", fmt.Errorf("%v contains no secret", name)
+		}
+		return s, nil
+	}
+	switch {
+	case stdin != nil:
+		secret, err = readSecret(stdin, "--derp-auth-secret-stdin")
+	case secretFD >= 0:
+		f := os.NewFile(uintptr(secretFD), "--derp-auth-secret-fd")
+		if f == nil {
+			return "", "", fmt.Errorf("--derp-auth-secret-fd %d is not an open descriptor", secretFD)
+		}
+		defer f.Close()
+		secret, err = readSecret(f, "--derp-auth-secret-fd")
+	case secretFile != "":
+		fi, err := os.Stat(secretFile)
+		if err != nil {
+			return "", "", err
+		}
+		if runtime.GOOS != "windows" && fi.Mode().Perm()&0o077 != 0 {
+			return "", "", fmt.Errorf("%v: permissions %v allow group or other access; chmod 600 it first", secretFile, fi.Mode().Perm())
+		}
+		var b []byte
+		b, err = os.ReadFile(secretFile)
+		if err == nil {
+			secret = strings.TrimSpace(string(b))
+			if secret == "" {
+				err = fmt.Errorf("%v contains no secret", secretFile)
+			}
+		}
+	default:
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if secret != "" {
+		return "", secret, nil
+	}
+	if tokenFile != "" {
+		b, err := os.ReadFile(tokenFile)
+		if err != nil {
+			return "", "", err
+		}
+		token = strings.TrimSpace(string(b))
+		if token == "" {
+			return "", "", fmt.Errorf("%v contains no token", tokenFile)
+		}
+	}
+	return token, secret, nil
+}
+
+// derpAuthFlag resolves the DERP admission credential flags once,
+// returning the static token (possibly empty) and the rotating
+// secret (possibly empty); exactly one of them may be set. It exits
+// with a usage error if the flags conflict or a source can't be
+// read.
+func derpAuthFlag() (string, string) {
+	derpAuthOnce.Do(func() {
+		var stdin io.Reader
+		if *flagDERPAuthSecretStd {
+			fi, err := os.Stdin.Stat()
+			if err != nil {
+				derpAuthErr = err
+				return
+			}
+			if fi.Mode()&os.ModeCharDevice != 0 {
+				derpAuthErr = errors.New("--derp-auth-secret-stdin: stdin is a terminal; pipe the secret in instead")
+				return
+			}
+			stdin = os.Stdin
+		}
+		derpAuthTokenVal, derpAuthSecretVal, derpAuthErr = resolveDerpAuth(*flagDERPAuthToken, *flagDERPAuthTokenFile, *flagDERPAuthSecret, *flagDERPAuthSecretFil, *flagDERPAuthSecretFD, stdin)
+	})
+	if derpAuthErr != nil {
+		log.Fatalf("tailcat: %v", derpAuthErr)
+	}
+	return derpAuthTokenVal, derpAuthSecretVal
+}
+
+var (
+	derpAuthOnce      sync.Once
+	derpAuthTokenVal  string
+	derpAuthSecretVal string
+	derpAuthErr       error
+)
+
 // resolveDerpMapKey returns the DERP map key from whichever of the
 // sources carries it: the --derpmap-key value, the file named by
 // --derpmap-key-file, the descriptor named by --derpmap-key-fd, or
@@ -1050,14 +1181,18 @@ func derpMapOpts() []any {
 // map cache.
 func newClient(logf logger.Logf, addr tailcat.Addr, priv key.NodePrivate) *tailcat.Client {
 	url, data := derpMapSourceFlag()
+	authToken, authSecret := derpAuthFlag()
 	return &tailcat.Client{
-		Server:       addr,
-		Key:          priv,
-		Logf:         logf,
-		DERPMapURL:   url,
-		DERPMapBytes: data,
-		DERPMapKey:   derpMapKeyFlag(),
-		DERPMapCache: derpMapCache{},
+		Server:         addr,
+		Key:            priv,
+		Logf:           logf,
+		DERPMapURL:     url,
+		DERPMapBytes:   data,
+		DerpAuthUser:   *flagDERPAuthUser,
+		DerpAuthToken:  authToken,
+		DerpAuthSecret: authSecret,
+		DERPMapKey:     derpMapKeyFlag(),
+		DERPMapCache:   derpMapCache{},
 	}
 }
 
@@ -1626,7 +1761,17 @@ func server(logf logger.Logf, serveSpec string, execArgs []string) {
 	ci.ServerDiscoPublic = tailcat.DiscoPublicForNode(priv)
 	connStr := ci.Addr()
 
-	s := &tailcat.Server{Key: priv, PresharedKey: psk, DisablePresharedKey: !usePSK, Logf: logf, Region: reg}
+	authToken, authSecret := derpAuthFlag()
+	s := &tailcat.Server{
+		Key:                 priv,
+		PresharedKey:        psk,
+		DisablePresharedKey: !usePSK,
+		Logf:                logf,
+		Region:              reg,
+		DerpAuthUser:        *flagDERPAuthUser,
+		DerpAuthToken:       authToken,
+		DerpAuthSecret:      authSecret,
+	}
 	sshServices := services.Contains("ssh") || services.Contains("no-auth-ssh") || services.Contains("files")
 	if sshServices && !tailcat.SupportsSSHServer() {
 		log.Fatalf("Tailscale SSH server not supported on %v", runtime.GOOS)
