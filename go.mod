@@ -12,7 +12,7 @@ require (
 	github.com/peterbourgon/ff/v4 v4.0.0-beta.1
 	github.com/pkg/sftp v1.13.11
 	github.com/tailscale/gliderssh v0.3.4-0.20260716005906-1a0f895faf28
-	github.com/tailscale/wireguard-go v0.0.0-20260924224943-0a83b87f7908
+	github.com/tailscale/wireguard-go v0.0.0-20260928213032-417aef361226
 	github.com/toqueteos/webbrowser v1.2.1
 	github.com/u-root/u-root v0.16.0
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745
@@ -48,6 +48,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.49.0 // indirect
 	github.com/aws/smithy-go v1.28.1 // indirect
 	github.com/axiomhq/hyperloglog v0.2.6 // indirect
+	github.com/benbjohnson/immutable v0.4.3 // indirect
+	github.com/bradfitz/reco v0.0.0-20260929154613-b883fbd17e3f // indirect
 	github.com/chromedp/sysutil v1.1.0 // indirect
 	github.com/coder/websocket v1.8.15 // indirect
 	github.com/coreos/go-iptables v0.8.0 // indirect
@@ -113,4 +115,4 @@ require (
 // Use the auth-patch branch of our tailscale fork, which carries the
 // DERP admission credentials feature; the same sources build the
 // patched derper in the derp workspace.
-replace tailscale.com => github.com/xukongyang/tailscale v0.0.0-20260921035941-13006c4b1893
+replace tailscale.com => github.com/xukongyang/tailscale v0.0.0-20261007050621-cb30518e50c9
