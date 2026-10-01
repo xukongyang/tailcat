@@ -113,4 +113,4 @@ require (
 // Use the auth-patch branch of our tailscale fork, which carries the
 // DERP admission credentials feature; the same sources build the
 // patched derper in the derp workspace.
-replace tailscale.com => github.com/xukongyang/tailscale v0.0.0-20260921035941-13006c4b1893
+replace tailscale.com => github.com/xukongyang/tailscale v0.0.0-20261001110334-24fac3733bc8
